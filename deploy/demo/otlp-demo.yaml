@@ -1,0 +1,134 @@
+---
+# OTLP Demo — mcp-reflector namespace
+# Deploys mcp-test-workload alongside an OpenTelemetry Collector.
+# The workload emits OTLP/HTTP traces to the collector sidecar on localhost:4318.
+# The collector logs received spans to stdout — visible via kubectl logs.
+#
+# Deploy:  kubectl apply -f deploy/demo/otlp-demo.yaml
+# Logs:    kubectl logs -n mcp-reflector deploy/otlp-demo -c collector -f
+# Cleanup: kubectl delete -f deploy/demo/otlp-demo.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-reflector
+  labels:
+    app.kubernetes.io/managed-by: mcp-ebpf-reflector
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: mcp-reflector
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+          grpc:
+            endpoint: 0.0.0.0:4317
+
+    exporters:
+      debug:
+        verbosity: detailed
+      file:
+        path: /dev/stdout
+        format: json
+
+    service:
+      telemetry:
+        logs:
+          level: debug
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [debug, file]
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otlp-demo
+  namespace: mcp-reflector
+  labels:
+    app: otlp-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otlp-demo
+  template:
+    metadata:
+      labels:
+        app: otlp-demo
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: workload
+          image: your-registry:5000/mcp-test-workload:dev
+          imagePullPolicy: Always
+          args:
+            - --otel-collector=http://localhost:4318
+            - --service-name=demo-agent
+            - --interval=3s
+          ports:
+            - name: mtls
+              containerPort: 8443
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.119.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/otel/config.yaml
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otel
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config

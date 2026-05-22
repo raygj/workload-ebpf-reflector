@@ -1,0 +1,203 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "ebpf-reflector-overview",
+    "project": "mcp-ebpf-reflector"
+  },
+  "spec": {
+    "display": {
+      "name": "eBPF Reflector — Crawl Overview"
+    },
+    "datasources": {
+      "prometheus": {
+        "default": true,
+        "plugin": {
+          "kind": "PrometheusDatasource",
+          "spec": {}
+        }
+      }
+    },
+    "duration": "30m",
+    "refreshInterval": "10s",
+    "panels": {
+      "eventsPerSec": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "eBPF Events / sec" },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {}
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "rate(reflector_ebpf_events_total[1m])"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "identitiesPerSec": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Identities Extracted / sec" },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {}
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "rate(reflector_identities_extracted_total[1m])"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "activeConnections": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Active Connections" },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": { "calculation": "last" }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "reflectormap_session_map_active_connections"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "distinctIdentities": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Distinct Identities" },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": { "calculation": "last" }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "reflectormap_session_map_identities_active"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "droppedEvents": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Dropped Events" },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {}
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "rate(reflector_events_dropped_total[1m])"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "streamHealth": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Stream Reconnects" },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {}
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "rate(reflector_stream_reconnects_total[5m])"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "identityBreakdown": {
+        "kind": "Panel",
+        "spec": {
+          "display": { "name": "Identity Type Breakdown" },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {}
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "query": "rate(reflector_identities_extracted_total[1m])"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "display": { "title": "Overview" },
+          "items": [
+            { "x": 0,  "y": 0, "width": 6,  "height": 4, "content": { "$ref": "#/spec/panels/activeConnections" } },
+            { "x": 6,  "y": 0, "width": 6,  "height": 4, "content": { "$ref": "#/spec/panels/distinctIdentities" } },
+            { "x": 12, "y": 0, "width": 12, "height": 4, "content": { "$ref": "#/spec/panels/eventsPerSec" } },
+            { "x": 0,  "y": 4, "width": 12, "height": 6, "content": { "$ref": "#/spec/panels/identitiesPerSec" } },
+            { "x": 12, "y": 4, "width": 12, "height": 6, "content": { "$ref": "#/spec/panels/identityBreakdown" } },
+            { "x": 0,  "y": 10, "width": 12, "height": 5, "content": { "$ref": "#/spec/panels/droppedEvents" } },
+            { "x": 12, "y": 10, "width": 12, "height": 5, "content": { "$ref": "#/spec/panels/streamHealth" } }
+          ]
+        }
+      }
+    ]
+  }
+}

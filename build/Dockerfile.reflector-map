@@ -1,0 +1,19 @@
+# Multi-stage build for the reflector-map sidecar.
+# No eBPF compilation needed — pure Go binary.
+
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+
+ARG TARGETARCH
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /reflector-map ./cmd/reflector-map/
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /reflector-map /reflector-map
+
+ENTRYPOINT ["/reflector-map"]

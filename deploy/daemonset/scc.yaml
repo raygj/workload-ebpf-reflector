@@ -1,0 +1,29 @@
+# SecurityContextConstraints for the eBPF reflector on OCP.
+# Requires privileged access for:
+#   - CAP_BPF: load eBPF programs
+#   - CAP_PERFMON: attach kprobes/uprobes, read perf/ring buffers
+#   - CAP_SYS_ADMIN: fallback for older kernels without CAP_BPF
+#   - hostPID: true for uprobe attachment to host processes
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: ebpf-reflector
+  labels:
+    app.kubernetes.io/name: ebpf-reflector
+    app.kubernetes.io/part-of: mcp-ebpf-reflector
+allowPrivilegedContainer: true
+allowHostPID: true
+allowHostNetwork: false
+allowHostPorts: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+volumes:
+  - configMap
+  - secret
+  - hostPath
+  - projected
+  - downwardAPI
+users:
+  - system:serviceaccount:ebpf-reflector:reflector

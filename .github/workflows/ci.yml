@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        run: go build ./cmd/reflector-map/...
+
+      - name: Vet
+        run: |
+          go vet ./internal/extract/...
+          go vet ./internal/session/...
+          go vet ./internal/stream/...
+          go vet ./internal/forward/...
+          go vet ./internal/policy/...
+          go vet ./cmd/reflector-map/...
+
+      - name: Test
+        run: |
+          go test -race -v ./internal/extract/...
+          go test -race -v ./internal/session/...
+          go test -race -v ./internal/stream/...
+          go test -race -v ./internal/forward/...
+          go test -race -v ./internal/policy/...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Vulnerability check
+        # Scope to pure-Go packages — internal/ebpf requires clang + bpf2go generate step
+        run: |
+          govulncheck \
+            ./internal/extract/... \
+            ./internal/session/... \
+            ./internal/stream/... \
+            ./internal/forward/... \
+            ./internal/policy/... \
+            ./cmd/reflector-map/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          golangci-lint run \
+            ./internal/extract/... \
+            ./internal/session/... \
+            ./internal/stream/... \
+            ./internal/forward/... \
+            ./internal/policy/... \
+            ./cmd/reflector-map/...

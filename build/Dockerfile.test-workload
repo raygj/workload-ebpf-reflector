@@ -1,0 +1,22 @@
+# Test workload: generates mTLS + JWT + MCP traffic for the reflector to observe.
+#
+# Cross-compilation: build stage uses native BUILDPLATFORM (arm64 on Apple Silicon)
+# so Go cross-compiles to TARGETARCH without QEMU — avoids asm segfaults under emulation.
+# Build for Forge cluster (amd64): docker buildx build --platform linux/amd64 ...
+
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS build
+
+ARG TARGETARCH
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /test-workload ./cmd/test-workload/
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /test-workload /test-workload
+
+ENTRYPOINT ["/test-workload"]

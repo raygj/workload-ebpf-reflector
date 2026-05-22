@@ -1,0 +1,182 @@
+# DaemonSet: eBPF Reflector
+# Runs on every node, hooks kernel syscalls via kprobes/uprobes,
+# extracts identity metadata, streams to reflector-map sidecar.
+# Reflect-only mode (ADR-002). Zero data plane impact.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reflector-policy
+  namespace: ebpf-reflector
+  labels:
+    app.kubernetes.io/part-of: mcp-ebpf-reflector
+data:
+  policy.rego: |
+    package reflector.policy
+
+    default allow := true
+    default reason := "default-allow"
+
+    deny contains "missing-spiffe-identity" if {
+        input.spiffe_id == ""
+    }
+
+    trusted_domains := {"cluster.local"}
+
+    deny contains "untrusted-trust-domain" if {
+        id := input.spiffe_id
+        id != ""
+        not any_trusted(id)
+    }
+
+    any_trusted(id) if {
+        some domain in trusted_domains
+        startswith(id, concat("", ["spiffe://", domain, "/"]))
+    }
+
+    allow := false if {
+        count(deny) > 0
+    }
+
+    reason := concat(", ", deny) if {
+        count(deny) > 0
+    }
+
+    result := {"allow": allow, "reason": reason}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ebpf-reflector
+  labels:
+    app.kubernetes.io/part-of: mcp-ebpf-reflector
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reflector
+  namespace: ebpf-reflector
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: reflector
+  namespace: ebpf-reflector
+  labels:
+    app.kubernetes.io/name: reflector
+    app.kubernetes.io/component: ebpf
+    app.kubernetes.io/part-of: mcp-ebpf-reflector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reflector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reflector
+        app.kubernetes.io/component: ebpf
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: reflector
+      hostPID: true
+      securityContext:
+        seccompProfile:
+          type: Unconfined
+      containers:
+        - name: reflector
+          image: your-registry:5000/reflector:dev
+          imagePullPolicy: Always
+          args:
+            - --sidecar-addr=reflector-map.ebpf-reflector.svc:9100
+            - --metrics-addr=:9090
+            - --node-id=$(NODE_NAME)
+            - --libssl=/host/usr/lib/libssl.so.3
+            - --libcrypto=/host/usr/lib/libcrypto.so.3
+            - --policy=/etc/reflector/policy.rego
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - BPF
+                - PERFMON
+                - SYS_ADMIN
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
+          volumeMounts:
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: debug
+              mountPath: /sys/kernel/debug
+            - name: host-usr-lib
+              mountPath: /host/usr/lib
+              readOnly: true
+            - name: policy
+              mountPath: /etc/reflector
+              readOnly: true
+      volumes:
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: host-usr-lib
+          hostPath:
+            path: /usr/lib
+            type: Directory
+        - name: policy
+          configMap:
+            name: reflector-policy
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reflector-metrics
+  namespace: ebpf-reflector
+  labels:
+    app.kubernetes.io/name: reflector
+spec:
+  selector:
+    app.kubernetes.io/name: reflector
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  clusterIP: None

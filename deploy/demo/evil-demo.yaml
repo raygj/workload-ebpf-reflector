@@ -1,0 +1,151 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: evil-demo
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+# Self-signed CA for the evil namespace
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: evil-ca
+  namespace: evil-demo
+spec:
+  selfSigned: {}
+---
+# TLS cert with UNTRUSTED SPIFFE URI SAN — evil.corp is not in trusted_domains
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: evil-server
+  namespace: evil-demo
+spec:
+  secretName: evil-server-tls
+  issuerRef:
+    name: evil-ca
+    kind: Issuer
+  commonName: evil-server.evil-demo.svc.cluster.local
+  dnsNames:
+    - evil-server
+    - evil-server.evil-demo.svc
+    - evil-server.evil-demo.svc.cluster.local
+  uris:
+    - spiffe://evil.corp/ns/evil-demo/sa/attacker
+  duration: 24h
+---
+# TLS server serving the evil.corp SPIFFE cert on port 4433
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evil-server
+  namespace: evil-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: evil-server
+  template:
+    metadata:
+      labels:
+        app: evil-server
+    spec:
+      containers:
+        - name: server
+          image: alpine/openssl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "=== EVIL SERVER ==="
+              echo "SPIFFE SAN on this cert:"
+              openssl x509 -in /tls/tls.crt -noout -ext subjectAltName
+              echo "--- Listening on :4433 (host libcrypto: $(ls /usr/lib/libcrypto.so* 2>/dev/null | head -1)) ---"
+              openssl s_server \
+                -cert /tls/tls.crt \
+                -key /tls/tls.key \
+                -port 4433 \
+                -www
+          ports:
+            - containerPort: 4433
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: host-usr-lib
+              mountPath: /usr/lib
+              readOnly: true
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: tls
+          secret:
+            secretName: evil-server-tls
+        - name: host-usr-lib
+          hostPath:
+            path: /usr/lib
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evil-server
+  namespace: evil-demo
+spec:
+  selector:
+    app: evil-server
+  ports:
+    - port: 4433
+      targetPort: 4433
+---
+# Client job: mounts host /usr/lib so openssl uses the HOST libcrypto inode
+# — the same inode the reflector attached its d2i_X509 uprobe to.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: evil-client
+  namespace: evil-demo
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: wait-for-server
+          image: busybox
+          command: ["sh", "-c", "sleep 8"]
+      containers:
+        - name: client
+          image: alpine/openssl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "=== SPIFFE FIREWALL DEMO: evil.corp attacker ==="
+              echo "Host libcrypto: $(ls /usr/lib/libcrypto.so* 2>/dev/null | head -1)"
+              echo ""
+              echo "Connecting to evil-server (spiffe://evil.corp/ns/evil-demo/sa/attacker) ..."
+              echo "Reflector should fire POLICY_VIOLATION on this handshake."
+              echo ""
+              for i in 1 2 3; do
+                echo "--- Handshake $i ---"
+                echo "Q" | openssl s_client \
+                  -connect evil-server.evil-demo.svc.cluster.local:4433 \
+                  -no_check_time \
+                  2>&1 || true
+                echo ""
+                sleep 5
+              done
+              echo "=== Done — check reflector logs for POLICY_VIOLATION ==="
+          volumeMounts:
+            - name: host-usr-lib
+              mountPath: /usr/lib
+              readOnly: true
+      volumes:
+        - name: host-usr-lib
+          hostPath:
+            path: /usr/lib
+            type: Directory

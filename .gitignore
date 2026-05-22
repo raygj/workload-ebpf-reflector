@@ -1,0 +1,40 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+/vendor/
+*.test
+cover.out
+cover.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python venvs (from tools/)
+.venv/
+__pycache__/
+*.egg-info/
+
+# Session logs (active only — archives are committed)
+.claude/session-log.md
+
+# Build artifacts
+*.zip
+
+# Root-level compiled binaries
+/reflector
+/reflector-map
+/reflector-map-sidecar

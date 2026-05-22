@@ -1,0 +1,46 @@
+# Multi-stage build for the eBPF reflector.
+# Stage 1: Compile eBPF C → BPF bytecode + generate Go bindings (bpf2go)
+# Stage 2: Build Go binary (cross-compiled for target arch)
+# Stage 3: Minimal runtime image
+#
+# The eBPF bytecode is compiled inside the container — no local clang needed.
+# Cross-compilation: same $BUILDPLATFORM pattern as all Forge MCP images.
+# Build for Forge cluster (amd64):
+#   docker buildx build --platform linux/amd64 -f Dockerfile.reflector \
+#     -o type=docker,dest=/tmp/reflector.tar .
+#   crane push /tmp/reflector.tar 192.168.2.59:5000/reflector:dev --insecure
+
+# --- Stage 1: eBPF compilation (runs on build host platform) ---
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS ebpf-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang llvm libbpf-dev linux-headers-generic \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Generate eBPF bytecode + Go bindings (clang → BPF bytecode, arch-independent)
+RUN go install github.com/cilium/ebpf/cmd/bpf2go@latest
+RUN go generate ./internal/ebpf/
+
+# --- Stage 2: Go build (cross-compile to target arch) ---
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS go-build
+
+ARG TARGETARCH
+
+WORKDIR /src
+COPY --from=ebpf-build /src /src
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+    -ldflags="-s -w" -o /reflector ./cmd/reflector/
+
+# --- Stage 3: Runtime ---
+FROM gcr.io/distroless/static-debian12
+
+COPY --from=go-build /reflector /reflector
+
+ENTRYPOINT ["/reflector"]

@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package ebpf.reflector.v1;
+
+option go_package = "github.com/raygj/workload-ebpf-reflector/api/v1;apiv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ReflectorService streams identity metadata from eBPF reflectors
+// to the reflector-map sidecar. Bidirectional: reflector pushes events,
+// sidecar can push commands back (empty in crawl, enforce in walk).
+// ADR-003.
+service ReflectorService {
+  rpc StreamEvents(stream ReflectorEvent) returns (stream WorkerCommand);
+}
+
+// ReflectorEvent is a single observed connection or identity event.
+message ReflectorEvent {
+  string node_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  EventType event_type = 3;
+
+  // Connection 5-tuple
+  string source_addr = 4;
+  string dest_addr = 5;
+  string protocol = 6;
+
+  // Identity (populated when extractable)
+  string source_identity = 7;
+  string dest_identity = 8;
+
+  // Classification
+  IdentityType identity_type = 9;
+
+  // Byte counters
+  uint64 bytes_tx = 10;
+  uint64 bytes_rx = 11;
+
+  // MCP-specific (optional)
+  string mcp_tool_name = 12;
+
+  // Process context
+  uint32 pid = 13;
+
+  // OTel-specific (populated when identity_type == OTEL)
+  string otel_service = 14;       // resource.attributes["service.name"]
+  string otel_signal_type = 15;   // "traces", "metrics", or "logs"
+  uint32 otel_span_count = 16;    // number of ResourceSpans/ResourceMetrics/ResourceLogs
+
+  // Policy-specific (populated when event_type == POLICY_VIOLATION)
+  string policy_rule = 17;        // Rego rule that triggered the violation
+
+  // Boundary session correlation (populated when a Boundary token is observed in headers)
+  string boundary_session_token = 22; // raw token value (at_*, s_*, or opaque UUID)
+  string boundary_token_type = 23;    // "auth", "session", or "opaque"
+
+  // Cert rotation fields (populated when event_type == CERT_ROTATION_*)
+  string cert_serial = 18;              // hex-encoded certificate serial number
+  google.protobuf.Timestamp cert_expiry = 19; // certificate NotAfter
+  string cert_issuer_fingerprint = 20;  // SHA-256 of issuer public key (hex)
+  string prev_cert_serial = 21;         // previous serial (for diff on rotation events)
+
+  enum EventType {
+    CONNECTION_OPEN = 0;
+    CONNECTION_CLOSE = 1;
+    DATA_EXCHANGE = 2;
+    STREAM_RESUMED = 3;
+    POLICY_VIOLATION = 4;
+    CERT_ROTATION_NORMAL = 5;   // scheduled rotation, same issuer
+    CERT_ROTATION_EARLY = 6;    // rotated before expected expiry [ANOMALY]
+    CERT_ROTATION_ISSUER = 7;   // issuer fingerprint changed [ANOMALY]
+    CERT_ROTATION_DOMAIN = 8;   // trust domain changed [ANOMALY]
+  }
+
+  enum IdentityType {
+    UNKNOWN = 0;
+    SPIFFE = 1;
+    JWT = 2;
+    MCP = 3;
+    OTEL = 4;
+  }
+}
+
+// WorkerCommand is sent from sidecar to reflector.
+// Empty in crawl. Walk adds enforce/release commands.
+message WorkerCommand {
+  // Reserved for walk stage.
+}

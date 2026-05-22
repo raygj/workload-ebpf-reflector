@@ -1,0 +1,143 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spiffe-demo
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+# Self-signed CA for the demo namespace
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: spiffe-demo-ca
+  namespace: spiffe-demo
+spec:
+  selfSigned: {}
+---
+# TLS cert with SPIFFE URI SAN — this is what d2i_X509 will capture
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: spiffe-demo-server
+  namespace: spiffe-demo
+spec:
+  secretName: spiffe-demo-server-tls
+  issuerRef:
+    name: spiffe-demo-ca
+    kind: Issuer
+  commonName: spiffe-demo-server.spiffe-demo.svc.cluster.local
+  dnsNames:
+    - spiffe-demo-server
+    - spiffe-demo-server.spiffe-demo.svc
+    - spiffe-demo-server.spiffe-demo.svc.cluster.local
+  uris:
+    - spiffe://cluster.local/ns/spiffe-demo/sa/demo-server
+  duration: 24h
+---
+# TLS server: openssl s_server serving the SPIFFE cert on port 4433
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spiffe-demo-server
+  namespace: spiffe-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spiffe-demo-server
+  template:
+    metadata:
+      labels:
+        app: spiffe-demo-server
+    spec:
+      containers:
+        - name: server
+          image: alpine/openssl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Server cert SPIFFE SAN:"
+              openssl x509 -in /tls/tls.crt -noout -ext subjectAltName
+              echo "---"
+              echo "Listening on :4433 ..."
+              while true; do
+                openssl s_server \
+                  -cert /tls/tls.crt \
+                  -key /tls/tls.key \
+                  -port 4433 \
+                  -www 2>&1 | head -3 || true
+              done
+          ports:
+            - containerPort: 4433
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: tls
+          secret:
+            secretName: spiffe-demo-server-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spiffe-demo-server
+  namespace: spiffe-demo
+spec:
+  selector:
+    app: spiffe-demo-server
+  ports:
+    - port: 4433
+      targetPort: 4433
+---
+# Client job: openssl s_client — uses libssl/libcrypto, triggers d2i_X509
+# Runs 5 handshakes with a 3s gap so the reflector log is easy to read.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spiffe-demo-client
+  namespace: spiffe-demo
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: wait
+          image: busybox
+          command: ["sh", "-c", "sleep 5"]
+      containers:
+        - name: client
+          image: alpine/openssl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "=== SPIFFE Demo: OpenSSL client → d2i_X509 uprobe ==="
+              echo "Using host libcrypto: $(ls -la /usr/lib/libcrypto.so.3)"
+              for i in 1 2 3 4 5; do
+                echo ""
+                echo "--- Handshake $i ---"
+                echo "Q" | openssl s_client \
+                  -connect spiffe-demo-server:4433 \
+                  -verify_return_error 0 \
+                  2>&1 | grep -E "subject|issuer|URI:|Verify|CONNECTED|error" || true
+                sleep 3
+              done
+              echo ""
+              echo "=== Done — check reflector logs for SPIFFE ID captured ==="
+          volumeMounts:
+            - name: host-usr-lib
+              mountPath: /usr/lib
+              readOnly: true
+      volumes:
+        - name: host-usr-lib
+          hostPath:
+            path: /usr/lib
+            type: Directory

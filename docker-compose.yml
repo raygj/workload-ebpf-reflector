@@ -1,0 +1,65 @@
+# Lab environment: eBPF reflector + sidecar + test workload
+#
+# Usage:
+#   make lab-demo         # build + start + test + teardown
+#   docker compose up -d  # start in background
+#   curl localhost:9101/sessions | jq   # query session map
+#   curl localhost:9101/stats | jq      # summary counts
+#   curl localhost:9091/metrics         # prometheus metrics
+#   curl localhost:9091/healthz         # health check
+#
+# The reflector needs privileged access + hostPID to load eBPF programs.
+# On Docker Desktop (macOS/Windows), eBPF attaches to the Linux VM kernel.
+
+services:
+  # Session map sidecar — receives gRPC stream, exposes HTTP API
+  reflector-map:
+    build:
+      context: .
+      dockerfile: build/Dockerfile.reflector-map
+    command:
+      - --grpc-addr=:9100
+      - --http-addr=:9101
+      - --metrics-addr=:9091
+      - --stale-ttl=30s
+    ports:
+      - "9100:9100"   # gRPC (reflector → sidecar)
+      - "9101:9101"   # HTTP session map API
+      - "9091:9091"   # Prometheus metrics + health
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # eBPF reflector — hooks kernel, streams metadata to sidecar
+  reflector:
+    build:
+      context: .
+      dockerfile: build/Dockerfile.reflector
+    command:
+      - --sidecar-addr=reflector-map:9100
+      - --metrics-addr=:9090
+      - --node-id=lab-node-1
+    privileged: true
+    pid: host
+    ports:
+      - "9090:9090"   # Prometheus metrics + health
+    volumes:
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /sys/kernel/debug:/sys/kernel/debug
+    depends_on:
+      reflector-map:
+        condition: service_healthy
+
+  # Test workload — generates mTLS + JWT + MCP traffic
+  test-workload:
+    build:
+      context: .
+      dockerfile: build/Dockerfile.test-workload
+    command:
+      - --listen=:8443
+      - --interval=2s
+    depends_on:
+      reflector-map:
+        condition: service_healthy
