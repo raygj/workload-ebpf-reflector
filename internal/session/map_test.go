@@ -14,7 +14,7 @@ func TestSessionMapConnectionOpen(t *testing.T) {
 		"spiffe://prod/agent/deploy", apiv1.ReflectorEvent_CONNECTION_OPEN)
 	m.HandleEvent(ev)
 
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -40,7 +40,7 @@ func TestSessionMapConnectionClose(t *testing.T) {
 		"", apiv1.ReflectorEvent_CONNECTION_CLOSE)
 	m.HandleEvent(close)
 
-	entries := m.QueryAll("", "", "closed")
+	entries := m.QueryAll("", "", "closed", "")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 closed entry, got %d", len(entries))
 	}
@@ -56,12 +56,12 @@ func TestSessionMapQueryByIdentity(t *testing.T) {
 	m.HandleEvent(NewTestEvent("node-1", "10.0.0.5:6000", "10.0.0.2:8200", "tcp",
 		"spiffe://prod/agent/scan", apiv1.ReflectorEvent_CONNECTION_OPEN))
 
-	deployConns := m.QueryAll("spiffe://prod/agent/deploy", "", "")
+	deployConns := m.QueryAll("spiffe://prod/agent/deploy", "", "", "")
 	if len(deployConns) != 2 {
 		t.Errorf("expected 2 connections for agent/deploy, got %d", len(deployConns))
 	}
 
-	scanConns := m.QueryAll("spiffe://prod/agent/scan", "", "")
+	scanConns := m.QueryAll("spiffe://prod/agent/scan", "", "", "")
 	if len(scanConns) != 1 {
 		t.Errorf("expected 1 connection for agent/scan, got %d", len(scanConns))
 	}
@@ -77,7 +77,7 @@ func TestSessionMapQueryByDestination(t *testing.T) {
 	m.HandleEvent(NewTestEvent("node-1", "10.0.0.1:5001", "kafka.prod:9092", "tcp",
 		"spiffe://prod/agent/deploy", apiv1.ReflectorEvent_CONNECTION_OPEN))
 
-	vaultConns := m.QueryAll("", "vault.prod:8200", "")
+	vaultConns := m.QueryAll("", "vault.prod:8200", "", "")
 	if len(vaultConns) != 2 {
 		t.Errorf("expected 2 connections to vault, got %d", len(vaultConns))
 	}
@@ -95,7 +95,7 @@ func TestSessionMapDataExchangeUpdatesBytes(t *testing.T) {
 	dataEv.BytesRx = 1024
 	m.HandleEvent(dataEv)
 
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if entries[0].BytesTx != 4096 {
 		t.Errorf("BytesTx = %d, want 4096", entries[0].BytesTx)
 	}
@@ -115,7 +115,7 @@ func TestSessionMapStreamResumedMarksStale(t *testing.T) {
 		EventType: apiv1.ReflectorEvent_STREAM_RESUMED,
 	})
 
-	stale := m.QueryAll("", "", "stale")
+	stale := m.QueryAll("", "", "stale", "")
 	if len(stale) != 1 {
 		t.Fatalf("expected 1 stale entry, got %d", len(stale))
 	}
@@ -123,7 +123,7 @@ func TestSessionMapStreamResumedMarksStale(t *testing.T) {
 		t.Errorf("stale entry NodeID = %q, want node-1", stale[0].NodeID)
 	}
 
-	active := m.QueryAll("", "", "active")
+	active := m.QueryAll("", "", "active", "")
 	if len(active) != 1 {
 		t.Fatalf("expected 1 active entry, got %d", len(active))
 	}
@@ -143,7 +143,7 @@ func TestSessionMapSweep(t *testing.T) {
 	m.Sweep()
 
 	// Closed entry should be removed after TTL
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries after sweep, got %d", len(entries))
 	}
@@ -159,7 +159,7 @@ func TestSessionMapSweepEvictsStaleEntries(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 	m.Sweep()
 
-	stale := m.QueryAll("", "", "stale")
+	stale := m.QueryAll("", "", "stale", "")
 	if len(stale) != 1 {
 		t.Fatalf("expected 1 stale entry after first sweep, got %d", len(stale))
 	}
@@ -168,7 +168,7 @@ func TestSessionMapSweepEvictsStaleEntries(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	m.Sweep()
 
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries after stale eviction sweep, got %d", len(entries))
 	}
@@ -210,7 +210,7 @@ func TestSessionMapOTELEvent(t *testing.T) {
 	}
 	m.HandleEvent(ev)
 
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -262,7 +262,7 @@ func TestSessionMapOTELDataExchangeUpdates(t *testing.T) {
 	}
 	m.HandleEvent(exchange)
 
-	entries := m.QueryAll("", "", "")
+	entries := m.QueryAll("", "", "", "")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}

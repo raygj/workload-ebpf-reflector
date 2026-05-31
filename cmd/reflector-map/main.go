@@ -4,8 +4,8 @@
 // bidirectional gRPC, maintains an observation-derived session map, and
 // exposes it via HTTP API for querying.
 //
-// ADR-003: NHI-PAM-Tool has no inbound telemetry API. This sidecar owns
-// the session map until NHI-PAM-Tool adds native non-proxied session awareness.
+// ADR-003: Boundary has no inbound telemetry API. This sidecar owns
+// the session map until Boundary adds native non-proxied session awareness.
 package main
 
 import (
@@ -23,10 +23,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	apiv1 "github.com/raygj/workload-ebpf-reflector/api/v1"
+	"github.com/raygj/workload-ebpf-reflector/internal/auth"
 	"github.com/raygj/workload-ebpf-reflector/internal/metrics"
 	"github.com/raygj/workload-ebpf-reflector/internal/session"
 	"github.com/raygj/workload-ebpf-reflector/internal/stream"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -35,6 +37,9 @@ func main() {
 	httpAddr := flag.String("http-addr", ":9101", "HTTP listen address for session map API")
 	metricsAddr := flag.String("metrics-addr", ":9091", "HTTP listen address for /healthz and /metrics")
 	staleTTL := flag.Duration("stale-ttl", 60*time.Second, "TTL before active entries become stale")
+	tlsCA := flag.String("tls-ca", "", "PEM CA cert for gRPC mTLS (ADR-013); if unset, gRPC runs insecure")
+	tlsCert := flag.String("tls-cert", "", "PEM server cert for gRPC mTLS")
+	tlsKey := flag.String("tls-key", "", "PEM server key for gRPC mTLS")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -81,12 +86,26 @@ func main() {
 	}()
 
 	// gRPC server for reflector streams
-	grpcServer := grpc.NewServer(
+	tlsCfg := auth.TLSConfig{CACertFile: *tlsCA, CertFile: *tlsCert, KeyFile: *tlsKey}
+	grpcOpts := []grpc.ServerOption{
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             60 * time.Second,
 			PermitWithoutStream: false,
 		}),
-	)
+	}
+	if tlsCfg.Enabled() {
+		creds, err := tlsCfg.ServerCredentials()
+		if err != nil {
+			logger.Error("gRPC mTLS setup failed", "error", err)
+			os.Exit(1)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		logger.Info("gRPC mTLS enabled — client cert required")
+	} else {
+		grpcOpts = append(grpcOpts, grpc.Creds(insecure.NewCredentials()))
+		logger.Warn("gRPC running without mTLS — set --tls-ca/cert/key for authenticated transport (ADR-013)")
+	}
+	grpcServer := grpc.NewServer(grpcOpts...)
 	streamServer := stream.NewServer(handler, logger)
 	apiv1.RegisterReflectorServiceServer(grpcServer, streamServer)
 
@@ -106,7 +125,7 @@ func main() {
 	api := session.NewAPI(sessionMap)
 	httpServer := &http.Server{
 		Addr:    *httpAddr,
-		Handler: api.Handler(),
+		Handler: auth.TokenMiddleware(api.Handler(), logger),
 	}
 	go func() {
 		logger.Info("HTTP API listening", "addr", *httpAddr,

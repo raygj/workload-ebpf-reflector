@@ -13,7 +13,7 @@ func TestProfileTrackerFirstObservationNoDeviation(t *testing.T) {
 
 	tr.Observe("spiffe://prod/agent/deploy", "vault:8200", "secrets/read", 1024, 512, now)
 
-	p := tr.Profile("spiffe://prod/agent/deploy", now)
+	p := tr.Profile("spiffe://prod/agent/deploy")
 	if p == nil {
 		t.Fatal("expected profile, got nil")
 	}
@@ -28,7 +28,7 @@ func TestProfileTrackerFirstObservationNoDeviation(t *testing.T) {
 
 func TestProfileTrackerUnknownIdentityReturnsNil(t *testing.T) {
 	tr := NewProfileTracker()
-	p := tr.Profile("spiffe://prod/unknown/identity", time.Now())
+	p := tr.Profile("spiffe://prod/unknown/identity")
 	if p != nil {
 		t.Errorf("expected nil for unseen identity, got %+v", p)
 	}
@@ -55,7 +55,7 @@ func TestProfileTrackerNormalBehaviorLowDeviation(t *testing.T) {
 			currentStart.Add(time.Duration(c)*30*time.Second))
 	}
 
-	p := tr.Profile(spiffeID, currentStart.Add(4*time.Minute))
+	p := tr.Profile(spiffeID)
 	if p == nil {
 		t.Fatal("expected profile, got nil")
 	}
@@ -85,7 +85,7 @@ func TestProfileTrackerConnectionSpike(t *testing.T) {
 			currentStart.Add(time.Duration(c)*time.Second))
 	}
 
-	p := tr.Profile(spiffeID, currentStart.Add(4*time.Minute))
+	p := tr.Profile(spiffeID)
 	if p == nil {
 		t.Fatal("expected profile, got nil")
 	}
@@ -116,7 +116,7 @@ func TestProfileTrackerNovelDestination(t *testing.T) {
 	tr.Observe(spiffeID, "vault:8200", "", 0, 0, currentStart)
 	tr.Observe(spiffeID, "db-prod.internal:5432", "", 0, 0, currentStart.Add(time.Minute))
 
-	p := tr.Profile(spiffeID, currentStart.Add(4*time.Minute))
+	p := tr.Profile(spiffeID)
 	if p == nil {
 		t.Fatal("expected profile, got nil")
 	}

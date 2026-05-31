@@ -132,6 +132,44 @@ func TestRotationTrackerHistoryCappedAtK(t *testing.T) {
 	}
 }
 
+func TestRotationTrackerPodRestartIsNotEarlyRotation(t *testing.T) {
+	tr := NewRotationTracker()
+	spiffeID := "spiffe://prod.example.com/ns/app/sa/worker"
+	now := time.Now()
+
+	// Pod A: cert with 24h lifetime, PID 1000
+	first := baseObs("serial-001", now, 24*time.Hour, "prod.example.com")
+	first.PID = 1000
+	tr.Track(spiffeID, first)
+
+	// Pod A restarts: new PID 2000, SPIRE immediately issues new cert — looks "early"
+	podRestart := baseObs("serial-002", now.Add(2*time.Hour), 24*time.Hour, "prod.example.com")
+	podRestart.PID = 2000
+	class := tr.Track(spiffeID, podRestart)
+	if class != RotationNormal {
+		t.Errorf("pod restart with new PID: class = %v, want RotationNormal (not false-positive early)", class)
+	}
+}
+
+func TestRotationTrackerSamePIDEarlyRotationIsAnomaly(t *testing.T) {
+	tr := NewRotationTracker()
+	spiffeID := "spiffe://prod.example.com/ns/app/sa/worker"
+	now := time.Now()
+
+	// Same pod: cert with 24h lifetime, PID 1000
+	first := baseObs("serial-001", now, 24*time.Hour, "prod.example.com")
+	first.PID = 1000
+	tr.Track(spiffeID, first)
+
+	// Same pod (PID 1000) rotates early — genuinely suspicious
+	early := baseObs("serial-002", now.Add(2*time.Hour), 24*time.Hour, "prod.example.com")
+	early.PID = 1000
+	class := tr.Track(spiffeID, early)
+	if class != RotationEarly {
+		t.Errorf("same PID early rotation: class = %v, want RotationEarly", class)
+	}
+}
+
 func TestRotationTrackerLearnedIntervalNormalAfterBaseline(t *testing.T) {
 	tr := NewRotationTracker()
 	spiffeID := "spiffe://prod.example.com/ns/app/sa/worker"

@@ -11,6 +11,10 @@ const (
 	profileWindowMax  = 12              // keep last 12 windows (1 hour history)
 	profileLearnMin   = 3               // minimum windows before baseline is meaningful
 
+	// profileDestSetMax caps DestSet entries per window (RT-009).
+	// Exceeding this is itself an anomaly signal — tracked via overflow counter.
+	profileDestSetMax = 1_000
+
 	// Deviation score weights (must sum to 1.0)
 	weightConnectionRate = 0.40
 	weightDestNovelty    = 0.40
@@ -19,13 +23,14 @@ const (
 
 // TimeWindow is a fixed-duration observation bucket for a single SPIFFE identity.
 type TimeWindow struct {
-	Start       time.Time
-	End         time.Time
-	Connections int
-	DestSet     map[string]int // dest addr → connection count
-	ToolSet     map[string]int // MCP tool name → call count
-	BytesTx     uint64
-	BytesRx     uint64
+	Start          time.Time
+	End            time.Time
+	Connections    int
+	DestSet        map[string]int // dest addr → connection count
+	ToolSet        map[string]int // MCP tool name → call count
+	BytesTx        uint64
+	BytesRx        uint64
+	DestSetOverflow int // count of destinations dropped due to cap (RT-009)
 }
 
 // BaselineStats summarizes historical windows for deviation scoring.
@@ -61,29 +66,52 @@ type BehavioralProfile struct {
 // ProfileTracker maintains rolling behavioral profiles per SPIFFE identity.
 // Thread-safe. Lives in the session map alongside the rotation tracker.
 type ProfileTracker struct {
-	mu      sync.Mutex
-	windows map[string][]*TimeWindow // spiffeID → ordered windows (oldest first)
+	mu         sync.Mutex
+	windows    map[string][]*TimeWindow // spiffeID → ordered windows (oldest first)
+	windowSize time.Duration
 }
 
-// NewProfileTracker creates an empty tracker.
+// NewProfileTracker creates an empty tracker with the default window size.
 func NewProfileTracker() *ProfileTracker {
+	return newProfileTracker(profileWindowSize)
+}
+
+func newProfileTracker(windowSize time.Duration) *ProfileTracker {
 	return &ProfileTracker{
-		windows: make(map[string][]*TimeWindow),
+		windows:    make(map[string][]*TimeWindow),
+		windowSize: windowSize,
 	}
 }
 
 // Observe records a connection event for the given SPIFFE identity.
 // dest and tool may be empty strings if not observed on this event.
+//
+// Baseline immutability (RT-008): once profileLearnMin windows have been
+// established, events with timestamps before the current window's start are
+// silently dropped. This prevents backdated event injection from rewriting
+// historical windows and poisoning the deviation baseline.
 func (p *ProfileTracker) Observe(spiffeID, dest, tool string, bytesTx, bytesRx uint64, at time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	windows := p.windows[spiffeID]
+
+	// Drop backdated events once baseline is established.
+	if len(windows) >= profileLearnMin {
+		if last := windows[len(windows)-1]; at.Before(last.Start) {
+			return
+		}
+	}
+
 	cur := p.currentWindow(spiffeID, windows, at)
 
 	cur.Connections++
 	if dest != "" {
-		cur.DestSet[dest]++
+		if _, exists := cur.DestSet[dest]; exists || len(cur.DestSet) < profileDestSetMax {
+			cur.DestSet[dest]++
+		} else {
+			cur.DestSetOverflow++
+		}
 	}
 	if tool != "" {
 		cur.ToolSet[tool]++
@@ -94,7 +122,12 @@ func (p *ProfileTracker) Observe(spiffeID, dest, tool string, bytesTx, bytesRx u
 
 // Profile returns the current behavioral profile and deviation score for a SPIFFE ID.
 // Returns nil if no observations have been recorded.
-func (p *ProfileTracker) Profile(spiffeID string, now time.Time) *BehavioralProfile {
+//
+// Uses the most recently observed window as "current" rather than advancing to an
+// empty wall-clock window. Window advancement is handled exclusively by Observe();
+// this prevents a race where crossing a window boundary between delivery confirmation
+// and profile query makes the observed burst appear as an empty current window.
+func (p *ProfileTracker) Profile(spiffeID string) *BehavioralProfile {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -103,15 +136,8 @@ func (p *ProfileTracker) Profile(spiffeID string, now time.Time) *BehavioralProf
 		return nil
 	}
 
-	// Advance to current window (may create a new empty one).
-	cur := p.currentWindow(spiffeID, windows, now)
-	windows = p.windows[spiffeID]
-
-	// Historical windows are everything except the current (incomplete) one.
-	historical := windows
-	if len(historical) > 0 && historical[len(historical)-1] == cur {
-		historical = historical[:len(historical)-1]
-	}
+	cur := windows[len(windows)-1]
+	historical := windows[:len(windows)-1]
 
 	baseline := computeBaseline(historical)
 	deviation := computeDeviation(cur, baseline)
@@ -119,7 +145,7 @@ func (p *ProfileTracker) Profile(spiffeID string, now time.Time) *BehavioralProf
 	return &BehavioralProfile{
 		SpiffeID:      spiffeID,
 		WindowCount:   len(windows),
-		CurrentWindow: cur,
+		CurrentWindow: copyWindow(cur),
 		Baseline:      baseline,
 		Deviation:     deviation,
 	}
@@ -129,7 +155,7 @@ func (p *ProfileTracker) Profile(spiffeID string, now time.Time) *BehavioralProf
 // creating a new one if the current window has expired. Rolls and caps history.
 // Must be called with p.mu held.
 func (p *ProfileTracker) currentWindow(spiffeID string, windows []*TimeWindow, t time.Time) *TimeWindow {
-	windowStart := t.Truncate(profileWindowSize)
+	windowStart := t.Truncate(p.windowSize)
 
 	// If there's an active window covering t, return it.
 	if len(windows) > 0 {
@@ -142,7 +168,7 @@ func (p *ProfileTracker) currentWindow(spiffeID string, windows []*TimeWindow, t
 	// Start a new window.
 	w := &TimeWindow{
 		Start:   windowStart,
-		End:     windowStart.Add(profileWindowSize),
+		End:     windowStart.Add(p.windowSize),
 		DestSet: make(map[string]int),
 		ToolSet: make(map[string]int),
 	}
@@ -154,6 +180,31 @@ func (p *ProfileTracker) currentWindow(spiffeID string, windows []*TimeWindow, t
 	}
 	p.windows[spiffeID] = windows
 	return w
+}
+
+// copyWindow returns a deep copy of a TimeWindow so callers can read it
+// without racing against concurrent Observe() calls on the original.
+func copyWindow(w *TimeWindow) *TimeWindow {
+	if w == nil {
+		return nil
+	}
+	c := &TimeWindow{
+		Start:           w.Start,
+		End:             w.End,
+		Connections:     w.Connections,
+		BytesTx:         w.BytesTx,
+		BytesRx:         w.BytesRx,
+		DestSetOverflow: w.DestSetOverflow,
+		DestSet:         make(map[string]int, len(w.DestSet)),
+		ToolSet:         make(map[string]int, len(w.ToolSet)),
+	}
+	for k, v := range w.DestSet {
+		c.DestSet[k] = v
+	}
+	for k, v := range w.ToolSet {
+		c.ToolSet[k] = v
+	}
+	return c
 }
 
 // computeBaseline summarizes a slice of completed windows into baseline stats.
@@ -187,7 +238,7 @@ func computeBaseline(windows []*TimeWindow) BaselineStats {
 	bs.AvgConnections, bs.StdConnections = meanStd(connCounts)
 	bs.AvgBytesTx, bs.StdBytesTx = meanStd(txCounts)
 
-	// Typical = seen in >= half of windows.
+	// Typical = seen in more than half of windows (strict majority).
 	threshold := len(windows) / 2
 	for d, count := range destFreq {
 		if count > threshold {
@@ -249,6 +300,10 @@ func computeDeviation(cur *TimeWindow, bs BaselineStats) DeviationReport {
 	if report.ByteScore > 0.5 {
 		report.Anomalies = append(report.Anomalies,
 			"byte_rate_spike: data volume significantly above baseline")
+	}
+	if cur.DestSetOverflow > 0 {
+		report.Anomalies = append(report.Anomalies,
+			"dest_set_overflow: destination count exceeded cap — possible scanning")
 	}
 
 	return report

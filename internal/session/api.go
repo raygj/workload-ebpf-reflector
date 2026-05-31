@@ -6,6 +6,8 @@ import (
 	"strconv"
 )
 
+const defaultSessionsLimit = 1_000
+
 // API exposes the session map over HTTP for querying.
 //
 // Endpoints:
@@ -25,23 +27,65 @@ func NewAPI(m *Map) *API {
 }
 
 // Handler returns an http.Handler with all routes registered.
+// Only GET is accepted; all other methods return 405 Method Not Allowed.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /sessions", a.handleSessions)
 	mux.HandleFunc("GET /stats", a.handleStats)
 	mux.HandleFunc("GET /attest", a.handleAttest)
 	mux.HandleFunc("GET /profile", a.handleProfile)
+	// Catch-all: reject non-GET methods on any registered path.
+	mux.HandleFunc("/sessions", methodNotAllowed)
+	mux.HandleFunc("/stats", methodNotAllowed)
+	mux.HandleFunc("/attest", methodNotAllowed)
+	mux.HandleFunc("/profile", methodNotAllowed)
 	return mux
 }
 
-func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
-	identity := r.URL.Query().Get("identity")
-	dest := r.URL.Query().Get("dest")
-	status := r.URL.Query().Get("status")
+func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Allow", "GET")
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
 
-	entries := a.sessionMap.QueryAll(identity, dest, status)
+func (a *API) handleSessions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	identity := q.Get("identity")
+	dest := q.Get("dest")
+	status := q.Get("status")
+	nodeID := q.Get("node_id")
+
+	limit := defaultSessionsLimit
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+	offset := 0
+	if s := q.Get("offset"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = n
+	}
+
+	entries := a.sessionMap.QueryAll(identity, dest, status, nodeID)
 	if entries == nil {
 		entries = []Entry{}
+	}
+
+	// Apply pagination.
+	if offset >= len(entries) {
+		entries = []Entry{}
+	} else {
+		entries = entries[offset:]
+		if len(entries) > limit {
+			entries = entries[:limit]
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -76,7 +120,7 @@ func (a *API) handleAttest(w http.ResponseWriter, r *http.Request) {
 	if pidStr != "" {
 		var err error
 		pid, err = strconv.ParseUint(pidStr, 10, 32)
-		if err != nil {
+		if err != nil || pid == 0 {
 			http.Error(w, "invalid pid", http.StatusBadRequest)
 			return
 		}

@@ -55,23 +55,41 @@ type Map struct {
 	mu       sync.RWMutex
 	entries  map[string]*Entry // keyed by connectionKey
 	staleTTL time.Duration
+	maxEntries int // hard cap; 0 = unlimited
 	rotation *RotationTracker
 	profiles *ProfileTracker
 }
 
+// DefaultMaxEntries is the hard cap on session map size (RT-005).
+// When full, the oldest stale/closed entry is evicted before inserting.
+const DefaultMaxEntries = 100_000
+
 // NewMap creates an empty session map with the given stale TTL.
 func NewMap(staleTTL time.Duration) *Map {
 	return &Map{
-		entries:  make(map[string]*Entry),
-		staleTTL: staleTTL,
-		rotation: NewRotationTracker(),
-		profiles: NewProfileTracker(),
+		entries:    make(map[string]*Entry),
+		staleTTL:   staleTTL,
+		maxEntries: DefaultMaxEntries,
+		rotation:   NewRotationTracker(),
+		profiles:   NewProfileTracker(),
+	}
+}
+
+// NewMapWithProfileWindow creates a session map with a custom profile window size.
+// Intended for tests that need short windows to avoid multi-minute waits.
+func NewMapWithProfileWindow(staleTTL, profileWindow time.Duration) *Map {
+	return &Map{
+		entries:    make(map[string]*Entry),
+		staleTTL:   staleTTL,
+		maxEntries: DefaultMaxEntries,
+		rotation:   NewRotationTracker(),
+		profiles:   newProfileTracker(profileWindow),
 	}
 }
 
 // GetProfile returns the behavioral profile for a SPIFFE identity, or nil if unknown.
 func (m *Map) GetProfile(spiffeID string) *BehavioralProfile {
-	return m.profiles.Profile(spiffeID, time.Now())
+	return m.profiles.Profile(spiffeID)
 }
 
 // HandleEvent processes a ReflectorEvent and updates the session map.
@@ -112,6 +130,10 @@ func (m *Map) HandleEvent(ev *apiv1.ReflectorEvent) {
 		if ev.BoundarySessionToken != "" {
 			e.BoundarySessionToken = ev.BoundarySessionToken
 			e.BoundaryTokenType = ev.BoundaryTokenType
+		}
+		// Enforce hard cap: evict the oldest stale/closed entry if full (RT-005).
+		if m.maxEntries > 0 && len(m.entries) >= m.maxEntries {
+			m.evictOldest()
 		}
 		m.entries[key] = e
 		// Feed behavioral profile on connection open for SPIFFE identities
@@ -207,6 +229,7 @@ func (m *Map) trackCertRotation(ev *apiv1.ReflectorEvent, now time.Time) {
 		IssuerFingerprint: ev.CertIssuerFingerprint,
 		TrustDomain:       trustDomainFromSPIFFE(ev.SourceIdentity),
 		ObservedAt:        now,
+		PID:               ev.Pid,
 	}
 
 	// Unlock to call Track (which has its own lock), then re-lock.
@@ -333,7 +356,7 @@ func (m *Map) Lookup(pid uint32, srcAddr, dstAddr string) AttestResult {
 
 // QueryAll returns all entries matching the given filters.
 // Empty filter values match everything.
-func (m *Map) QueryAll(identity, dest, status string) []Entry {
+func (m *Map) QueryAll(identity, dest, status, nodeID string) []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -346,6 +369,9 @@ func (m *Map) QueryAll(identity, dest, status string) []Entry {
 			continue
 		}
 		if status != "" && e.Status != status {
+			continue
+		}
+		if nodeID != "" && e.NodeID != nodeID {
 			continue
 		}
 		results = append(results, *e)
@@ -410,6 +436,34 @@ func (m *Map) Sweep() {
 				e.Status = "stale"
 			}
 		}
+	}
+}
+
+// evictOldest removes the single oldest stale or closed entry to make room.
+// If none exist, removes the oldest active entry (last resort).
+// Must be called with m.mu held.
+func (m *Map) evictOldest() {
+	var evictKey string
+	var evictTime time.Time
+	// Prefer evicting stale/closed entries first.
+	for key, e := range m.entries {
+		if (e.Status == "stale" || e.Status == "closed") &&
+			(evictKey == "" || e.LastSeen.Before(evictTime)) {
+			evictKey = key
+			evictTime = e.LastSeen
+		}
+	}
+	// Fall back to oldest active entry if no stale/closed exist.
+	if evictKey == "" {
+		for key, e := range m.entries {
+			if evictKey == "" || e.LastSeen.Before(evictTime) {
+				evictKey = key
+				evictTime = e.LastSeen
+			}
+		}
+	}
+	if evictKey != "" {
+		delete(m.entries, evictKey)
 	}
 }
 

@@ -9,6 +9,12 @@ const (
 	certHistoryMax   = 10            // max observations kept per SPIFFE path
 	rotationLearnMin = 3             // minimum observations before interval baseline is used
 	earlyFraction    = 0.75          // rotation is "early" if it fires before this fraction of expected lifetime
+
+	// rotationRateWindow is the window over which rotationRateMax is enforced (RT-006).
+	rotationRateWindow = time.Minute
+	// rotationRateMax is the max cert rotation events accepted per identity per window.
+	// Exceeding this drops the event silently — prevents signal flooding (F-005).
+	rotationRateMax = 10
 )
 
 // CertObservation is a single cert observation for a SPIFFE path.
@@ -18,6 +24,10 @@ type CertObservation struct {
 	IssuerFingerprint string
 	TrustDomain       string
 	ObservedAt        time.Time
+	// PID is the process ID of the workload that presented this cert.
+	// Used to distinguish pod restarts (new PID, same SPIFFE path) from
+	// in-process early rotation (same PID, new cert before expiry).
+	PID uint32
 }
 
 // RotationClass classifies a new cert observation relative to history.
@@ -34,14 +44,18 @@ const (
 // RotationTracker maintains cert history per SPIFFE path and classifies
 // new observations. Thread-safe. Lives in the session map sidecar.
 type RotationTracker struct {
-	mu      sync.Mutex
-	history map[string][]CertObservation // keyed by SPIFFE path (full URI)
+	mu        sync.Mutex
+	history   map[string][]CertObservation // keyed by SPIFFE path (full URI)
+	rateCount map[string]int               // events seen in current rate window
+	rateReset map[string]time.Time         // when the rate window resets
 }
 
 // NewRotationTracker creates an empty tracker.
 func NewRotationTracker() *RotationTracker {
 	return &RotationTracker{
-		history: make(map[string][]CertObservation),
+		history:   make(map[string][]CertObservation),
+		rateCount: make(map[string]int),
+		rateReset: make(map[string]time.Time),
 	}
 }
 
@@ -50,6 +64,20 @@ func NewRotationTracker() *RotationTracker {
 func (t *RotationTracker) Track(spiffeID string, obs CertObservation) RotationClass {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Per-identity rate limiting: drop events exceeding rotationRateMax per window (RT-006).
+	now := obs.ObservedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if reset, ok := t.rateReset[spiffeID]; !ok || now.After(reset) {
+		t.rateCount[spiffeID] = 0
+		t.rateReset[spiffeID] = now.Add(rotationRateWindow)
+	}
+	t.rateCount[spiffeID]++
+	if t.rateCount[spiffeID] > rotationRateMax {
+		return RotationFirstSeen // silently drop; caller treats as no-op
+	}
 
 	hist := t.history[spiffeID]
 
@@ -67,6 +95,8 @@ func (t *RotationTracker) Track(spiffeID string, obs CertObservation) RotationCl
 
 	var class RotationClass
 
+	pidChanged := obs.PID != 0 && last.PID != 0 && obs.PID != last.PID
+
 	switch {
 	case obs.TrustDomain != last.TrustDomain:
 		class = RotationDomainChange
@@ -74,7 +104,10 @@ func (t *RotationTracker) Track(spiffeID string, obs CertObservation) RotationCl
 	case obs.IssuerFingerprint != last.IssuerFingerprint:
 		class = RotationIssuerChange
 
-	case isEarlyRotation(obs, last, hist):
+	case isEarlyRotation(obs, last, hist) && !pidChanged:
+		// Early rotation on the same process is suspicious. If the PID changed,
+		// it's a pod restart — SPIRE issues a new SVID immediately, which looks
+		// early against the previous pod's cert timeline. That's expected, not anomalous.
 		class = RotationEarly
 
 	default:

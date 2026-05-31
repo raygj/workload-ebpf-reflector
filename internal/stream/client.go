@@ -9,6 +9,7 @@ import (
 	"time"
 
 	apiv1 "github.com/raygj/workload-ebpf-reflector/api/v1"
+	"github.com/raygj/workload-ebpf-reflector/internal/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -16,11 +17,12 @@ import (
 
 // Client streams ReflectorEvents to the reflector-map sidecar.
 type Client struct {
-	addr   string
-	nodeID string
-	logger *slog.Logger
-	conn   *grpc.ClientConn
-	stream apiv1.ReflectorService_StreamEventsClient
+	addr    string
+	nodeID  string
+	tlsCfg  auth.TLSConfig
+	logger  *slog.Logger
+	conn    *grpc.ClientConn
+	stream  apiv1.ReflectorService_StreamEventsClient
 }
 
 // NewClient creates a stream client targeting the sidecar at addr.
@@ -28,16 +30,36 @@ func NewClient(addr, nodeID string, logger *slog.Logger) *Client {
 	return &Client{addr: addr, nodeID: nodeID, logger: logger}
 }
 
+// NewClientTLS creates a stream client with mTLS credentials (ADR-013).
+func NewClientTLS(addr, nodeID string, tlsCfg auth.TLSConfig, logger *slog.Logger) *Client {
+	return &Client{addr: addr, nodeID: nodeID, tlsCfg: tlsCfg, logger: logger}
+}
+
 // Connect establishes the gRPC connection and opens the bidirectional stream.
 func (c *Client) Connect(ctx context.Context) error {
-	conn, err := grpc.NewClient(c.addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	dialOpts := []grpc.DialOption{
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                120 * time.Second,
 			Timeout:             20 * time.Second,
 			PermitWithoutStream: false,
 		}),
-	)
+	}
+
+	if c.tlsCfg.Enabled() {
+		// serverName is the hostname the server cert must match.
+		// For file-based POC certs this is the CN of the server cert.
+		creds, err := c.tlsCfg.ClientCredentials("reflector-map")
+		if err != nil {
+			return fmt.Errorf("building mTLS credentials: %w", err)
+		}
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(creds))
+		c.logger.Info("stream client using mTLS", "sidecar", c.addr)
+	} else {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		c.logger.Warn("stream client using insecure transport (no TLS config provided)")
+	}
+
+	conn, err := grpc.NewClient(c.addr, dialOpts...)
 	if err != nil {
 		return fmt.Errorf("connecting to sidecar at %s: %w", c.addr, err)
 	}
