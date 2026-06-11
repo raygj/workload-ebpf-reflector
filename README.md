@@ -30,6 +30,21 @@ The application never decides. The kernel decides.
 
 **Stage:** WALK — SPIFFE Firewall. Observe, evaluate, enforce.
 
+## Starfly Fabrics
+
+Reflector is the **sense layer** in the [Starfly Fabrics ecosystem](https://starfly.dev/1.0/docs/ecosystem/) — kernel-level visibility that complements the Starfly identity PEP without touching exchange or revocation.
+
+| Layer | Repo | Role |
+|-------|------|------|
+| **Reflector** (this repo) | [workload-ebpf-reflector](https://github.com/raygj/workload-ebpf-reflector) | Observe SPIFFE, JWT, MCP at the wire |
+| **Starfly** | [project-starfly-fabrics](https://github.com/raygj/project-starfly-fabrics) | Mint WIMSE, enforce delegation, revoke |
+
+Reflector does not mint WIMSE. Starfly does not load eBPF programs. Compose when you want ground-truth platform senses alongside PEP audit.
+
+- [Reflector — ecosystem docs](https://starfly.dev/1.0/docs/ecosystem/reflector/)
+- [Credential patterns — SPIFFE / SPIRE](https://starfly.dev/1.0/docs/integrators/credential-patterns/#spiffe--spire)
+- [Operations dashboard](https://starfly.dev/1.0/docs/integrators/dashboard/) — NOC view for fabric metrics
+
 ## How It Works
 
 ```
