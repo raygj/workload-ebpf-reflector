@@ -8,7 +8,7 @@ Your agents are making MCP tool calls, API requests, and service-to-service conn
 
 An eBPF-based identity observation and enforcement layer deployed as a DaemonSet on Kubernetes. It intercepts TLS handshakes at the kernel, extracts SPIFFE identity from the certificate, evaluates OPA policy, and blocks untrusted trust domains — all before the application processes the connection. Zero data plane latency. No agent modification. No payload decryption.
 
-> **The Reflector intercepts TLS handshakes at the kernel, extracts SPIFFE identity from the certificate, evaluates OPA policy, and blocks untrusted trust domains — all before the application processes the connection. Zero application modification. Zero user-space proxy. Wire speed.**
+> **The Reflector intercepts TLS handshakes at the kernel, extracts SPIFFE identity from the certificate, evaluates OPA policy, and blocks untrusted trust domains — all before the application processes the connection. Zero application modification. Zero user-space proxy.**
 
 ```
 TLS handshake begins
