@@ -52,7 +52,7 @@ func TestTokenMiddlewareAcceptsCorrectToken(t *testing.T) {
 }
 
 func TestTokenMiddlewareUnsetIsNoOp(t *testing.T) {
-	os.Unsetenv("REFLECTOR_API_TOKEN")
+	_ = os.Unsetenv("REFLECTOR_API_TOKEN")
 	h := auth.TokenMiddleware(okHandler, logger())
 	r := httptest.NewRequest("GET", "/sessions", nil)
 	w := httptest.NewRecorder()
